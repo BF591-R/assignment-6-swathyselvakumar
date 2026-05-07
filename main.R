@@ -1,7 +1,5 @@
 #!/usr/bin/Rscript
-## Author: Taylor Falk
-## tfalk@bu.edu
-## BU BF591
+## Author: Swathy Selvakumar
 ## Assignment Week 6
 
 libs <- c("tidyverse", "ggVennDiagram", "BiocManager",
@@ -33,7 +31,23 @@ for (package in libs) {
 #'
 #' @examples counts_df <- load_n_trim("/path/to/counts/verse_counts.tsv")
 load_n_trim <- function(filename) {
-    return(NULL)
+  # 1. Load the data (assuming TSV based on the example path)
+  # We use check.names = FALSE to ensure column names like vP0_1 don't change
+  raw_counts <- read.table(filename, header = TRUE, sep = "\t", check.names = FALSE)
+  
+  # 2. Select only the specified columns
+  # We need 'gene' for the row names, plus the four experimental samples
+  trimmed_df <- raw_counts[, c("gene", "vP0_1", "vP0_2", "vAd_1", "vAd_2")]
+  
+  # 3. Convert the 'gene' column to row names
+  # Differential expression packages require numeric-only columns
+  rownames(trimmed_df) <- trimmed_df$gene
+  
+  # 4. Remove the 'gene' column now that it is stored in the row names
+  trimmed_df$gene <- NULL
+  
+  # 5. Ensure it is a standard data.frame (and not a tibble)
+  return(as.data.frame(trimmed_df))
 }
 
 #' Perform a DESeq2 analysis of rna seq data
@@ -57,7 +71,30 @@ load_n_trim <- function(filename) {
 #'
 #' @examples run_deseq(counts_df, coldata, 10, "condition_day4_vs_day7")
 run_deseq <- function(count_dataframe, coldata, count_filter, condition_name) {
-    return(NULL)
+  # 1. Create the DESeqDataSet object
+  # We assume 'condition' is the factor of interest in your coldata
+  dds <- DESeq2::DESeqDataSetFromMatrix(countData = count_dataframe,
+                                        colData = coldata,
+                                        design = ~ condition)
+  
+  # 2. Pre-filtering: Remove rows with very low counts
+  # Keep only rows where the total sum of counts across all samples is >= count_filter
+  keep <- rowSums(DESeq2::counts(dds)) >= count_filter
+  dds <- dds[keep, ]
+  
+  # 3. Run the DESeq differential expression pipeline
+  dds <- DESeq2::DESeq(dds)
+  
+  # 4. Extract results for the specific condition
+  # condition_name is expected in the format "condition_level_vs_reference"
+  # We split the string to use the contrast argument: c("condition", "level", "reference")
+  contrast_parts <- strsplit(condition_name, "_")[[1]]
+  
+  # Extract results using the contrast vector: c("factor_name", "numerator", "denominator")
+  res <- DESeq2::results(dds, contrast = c(contrast_parts[1], contrast_parts[2], contrast_parts[4]))
+  
+  # 5. Return as a standard data frame for downstream use
+  return(as.data.frame(res))
 }
 
 #### edgeR ####
@@ -77,7 +114,28 @@ run_deseq <- function(count_dataframe, coldata, count_filter, condition_name) {
 #'
 #' @examples run_edger(counts_df, group)
 run_edger <- function(count_dataframe, group) {
-    return(NULL)
+  # Check if 'group' is a data frame. If so, extract the 'condition' column.
+  # If it's already a vector/factor, use it as is.
+  group_vector <- if (is.data.frame(group)) group$condition else group
+  
+  # 1. Create a DGEList object
+  # Now using the resolved group_vector
+  dge <- edgeR::DGEList(counts = count_dataframe, group = group_vector)
+  
+  # 2. Normalize for library size
+  dge <- edgeR::calcNormFactors(dge)
+  
+  # 3. Estimate Dispersion
+  dge <- edgeR::estimateDisp(dge)
+  
+  # 4. Perform the Exact Test
+  et <- edgeR::exactTest(dge)
+  
+  # 5. Extract results and format
+  res <- edgeR::topTags(et, n = Inf)
+  final_df <- as.data.frame(res$table)[, c("logFC", "logCPM", "PValue")]
+  
+  return(final_df)
 }
 
  #### limma ####
@@ -101,7 +159,29 @@ run_edger <- function(count_dataframe, group) {
 #' 
 #' @examples run_limma(counts_df, design, voom=TRUE)
 run_limma <- function(counts_dataframe, design, group) {
-    return(NULL)
+  # 1. Create a DGEList object (limma works seamlessly with edgeR objects)
+  dge <- edgeR::DGEList(counts = counts_dataframe)
+  
+  # 2. Normalize for library size (TMM normalization)
+  dge <- edgeR::calcNormFactors(dge)
+  
+  # 3. Apply the voom transformation
+  # This converts counts to log2-counts per million and calculates weights
+  v <- limma::voom(dge, design, plot = FALSE)
+  
+  # 4. Fit the linear model
+  fit <- limma::lmFit(v, design)
+  
+  # 5. Empirical Bayes moderation
+  # This "borrows" information across genes to shrink variance estimates
+  fit <- limma::eBayes(fit)
+  
+  # 6. Extract the top 1,000 results
+  # We use coef = 2 assuming the comparison of interest is the second column 
+  # of the design matrix. sort.by = "p" ensures we get the smallest p-values.
+  res <- limma::topTable(fit, coef = ncol(design), number = 1000, sort.by = "p")
+  
+  return(as.data.frame(res))
 }
 
 #### ggplot ####
@@ -133,7 +213,33 @@ run_limma <- function(counts_dataframe, design, group) {
 #' 2 deseq   9.97e-261
 #' 3 deseq   1.16e-206
 combine_pval <- function(deseq, edger, limma) {
-    return(NULL)
+  # 1. Extract p-values and sort to ensure we get the top 1,000
+  # DESeq2 uses "pvalue"
+  deseq_p <- sort(deseq$pvalue, decreasing = FALSE)[1:1000]
+  
+  # edgeR uses "PValue"
+  edger_p <- sort(edger$PValue, decreasing = FALSE)[1:1000]
+  
+  # limma uses "P.Value"
+  limma_p <- sort(limma$P.Value, decreasing = FALSE)[1:1000]
+  
+  # 2. Create a Wide Data Frame first
+  wide_df <- data.frame(
+    deseq = deseq_p,
+    edger = edger_p,
+    limma = limma_p
+  )
+  
+  # 3. Use tidyr::pivot_longer (modern replacement for gather) 
+  # or tidyr::gather to "melt" the table
+  combined_long <- tidyr::pivot_longer(
+    wide_df, 
+    cols = everything(), 
+    names_to = "package", 
+    values_to = "pval"
+  )
+  
+  return(combined_long)
 }
 
 #' Create three separate facets for each of the diff. exp. pacakges.
@@ -157,7 +263,39 @@ combine_pval <- function(deseq, edger, limma) {
 #' 1  -9.84 2.23e-180 edgeR  
 #' 2   6.18 5.87e-179 edgeR  
 create_facets <- function(deseq, edger, limma) {
-    return(NULL)
+  # 1. Process DESeq2
+  # Columns: log2FoldChange, padj
+  df_deseq <- data.frame(
+    logFC = deseq$log2FoldChange,
+    padj = deseq$padj,
+    package = "DESeq2"
+  )
+  df_deseq <- df_deseq[order(df_deseq$padj), ][1:1000, ]
+  
+  # 2. Process edgeR
+  # Note: edgeR results from exactTest don't always include padj (FDR) 
+  # unless topTags was called. We use the PValue column or FDR if available.
+  # Following standard topTags output:
+  df_edger <- data.frame(
+    logFC = edger$logFC,
+    padj = edger$PValue, # Or edger$FDR if available in your object
+    package = "edgeR"
+  )
+  df_edger <- df_edger[order(df_edger$padj), ][1:1000, ]
+  
+  # 3. Process Limma
+  # Columns: logFC, adj.P.Val
+  df_limma <- data.frame(
+    logFC = limma$logFC,
+    padj = limma$adj.P.Val,
+    package = "Limma"
+  )
+  df_limma <- df_limma[order(df_limma$padj), ][1:1000, ]
+  
+  # 4. Combine all tables vertically
+  combined_facets <- rbind(df_deseq, df_edger, df_limma)
+  
+  return(combined_facets)
 }
 
 #' Create an attractive volcano plot of three diff. exp. packages' data.
@@ -187,6 +325,51 @@ create_facets <- function(deseq, edger, limma) {
 #'
 #' @examples p <- theme_plot(volcano)
 theme_plot <- function(volcano_data) {
-    return(NULL)
+  library(ggplot2)
+  
+  # 1. Define significance thresholds for visual cues
+  logfc_threshold <- 1
+  pval_threshold <- 0.05
+  
+  # 2. Create the plot
+  p <- ggplot(volcano_data, aes(x = logFC, y = -log10(padj), color = package)) +
+    # Use geom_point with low alpha (transparency) to handle overplotting
+    geom_point(alpha = 0.4, size = 1.2) +
+    
+    # Add vertical lines for Fold Change thresholds
+    geom_vline(xintercept = c(-logfc_threshold, logfc_threshold), 
+               linetype = "dashed", color = "gray40", size = 0.4) +
+    
+    # Add horizontal line for p-value threshold
+    geom_hline(yintercept = -log10(pval_threshold), 
+               linetype = "dashed", color = "gray40", size = 0.4) +
+    
+    # Separate the plot by package
+    facet_wrap(~package) +
+    
+    # Custom Color Palette (Modern/Professional)
+    scale_color_brewer(palette = "Set1") +
+    
+    # Labels and Titles
+    labs(
+      title = "Differential Expression Comparison",
+      subtitle = paste("Comparison of top 1,000 genes; dashed lines at padj <", pval_threshold, "and |logFC| >", logfc_threshold),
+      x = expression(Log[2]~Fold~Change),
+      y = expression(-Log[10]~Adjusted~P-value),
+      color = "Package"
+    ) +
+    
+    # Theme Overrides
+    theme_minimal(base_size = 14) + # Clean white background
+    theme(
+      legend.position = "bottom",
+      strip.background = element_rect(fill = "gray95", color = NA), # Label boxes for facets
+      strip.text = element_text(face = "bold", color = "black"),
+      panel.grid.minor = element_blank(), # Remove minor grid lines for a cleaner look
+      plot.title = element_text(face = "bold", size = 18),
+      plot.subtitle = element_text(size = 10, color = "gray30")
+    )
+  
+  return(p)
 }
 
